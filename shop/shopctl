@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Operator CLI for the demo shop. This is everything an on-call responder, human or agent, gets."""
+import argparse, json, os, pathlib, subprocess, sys, time, urllib.error, urllib.request
+
+HERE = pathlib.Path(__file__).resolve().parent
+STATE = HERE / "state"
+SHOP = "http://127.0.0.1:8100"
+PROBER = "http://127.0.0.1:8102"
+RELEASES = {
+    "v2.13.2": {"notes": "Baseline release.", "migrations": []},
+    "v2.14.0": {"notes": "Tax line on orders. Refactors the payments client.", "migrations": ["0014_orders_tax_cents: adds NOT NULL orders.tax_cents (irreversible)"]},
+}
+
+
+def get(url):
+    try:
+        with urllib.request.urlopen(url, timeout=2) as r:
+            return json.load(r)
+    except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError) as e:
+        return {"unreachable": str(e)}
+
+
+def compose(*args, capture=False):
+    return subprocess.run(["docker", "compose", *args], cwd=HERE, check=not capture, capture_output=capture, text=True)
+
+
+def env():
+    return dict(l.split("=", 1) for l in (STATE / "shop.env").read_text().splitlines() if "=" in l)
+
+
+def write_env(**changes):
+    values = {**env(), **changes}
+    (STATE / "shop.env").write_text("".join(f"{k}={v}\n" for k, v in values.items()))
+
+
+def audit(action, **fields):
+    entry = {"ts": round(time.time(), 3), "actor": os.environ.get("BLACKOUT_ACTOR", "unknown"), "action": action, **fields}
+    with (STATE / "audit.jsonl").open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def history():
+    p = STATE / "deploys.json"
+    return json.loads(p.read_text()) if p.exists() else []
+
+
+def restart_and_wait():
+    compose("up", "-d", "--force-recreate", "--no-deps", "shop", capture=True)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        h = get(f"{SHOP}/health")
+        if h.get("ok"):
+            return h
+        time.sleep(0.5)
+    return None
+
+
+def deploy(version, kind="deploy"):
+    write_env(SHOP_VERSION=version)
+    h = restart_and_wait()
+    log = history() + [{"ts": round(time.time(), 3), "version": version, "kind": kind, **RELEASES[version]}]
+    (STATE / "deploys.json").write_text(json.dumps(log, indent=2))
+    audit(kind, version=version, healthy=bool(h))
+    return h
+
+
+def cmd_status(_):
+    audit("read", what="status")
+    print(json.dumps({"running": get(f"{SHOP}/health"), "shop_metrics": get(f"{SHOP}/metrics"), "customer_view": get(f"{PROBER}/?window=15")}, indent=2))
+
+
+def cmd_logs(a):
+    audit("read", what="logs")
+    r = compose("logs", "shop", "--no-log-prefix", "--since", a.since, "--tail", str(a.tail), capture=True)
+    print(r.stdout, end="")
+
+
+def cmd_deploys(_):
+    audit("read", what="deploys")
+    for d in history():
+        print(json.dumps(d))
+
+
+def cmd_deploy(a):
+    if a.version not in RELEASES:
+        sys.exit(f"unknown version {a.version}; known: {', '.join(RELEASES)}")
+    h = deploy(a.version)
+    print(f"deployed {a.version}" if h else f"{a.version} did not become healthy; run shopctl logs")
+    sys.exit(0 if h else 1)
+
+
+def cmd_rollback(_):
+    versions = [d["version"] for d in history()]
+    previous = next((v for v in reversed(versions) if v != versions[-1]), None)
+    if previous is None:
+        sys.exit("nothing to roll back to")
+    h = deploy(previous, kind="rollback")
+    print(f"rolled back to {previous}" if h else f"rollback to {previous} did not become healthy; run shopctl logs")
+    sys.exit(0 if h else 1)
+
+
+def cmd_rotate(_):
+    write_env(PAYMENT_KEY=env()["PAYMENT_KEY_SECONDARY"])
+    h = restart_and_wait()
+    audit("rotate-payment-key", healthy=bool(h))
+    print("switched to the secondary payment key" if h else "shop did not become healthy; run shopctl logs")
+    sys.exit(0 if h else 1)
+
+
+p = argparse.ArgumentParser(prog="shopctl", description=__doc__)
+sub = p.add_subparsers(required=True)
+sub.add_parser("status", help="running version, error rate, customer success rate").set_defaults(fn=cmd_status)
+s = sub.add_parser("logs", help="shop logs as JSON lines")
+s.add_argument("--since", default="5m")
+s.add_argument("--tail", type=int, default=50)
+s.set_defaults(fn=cmd_logs)
+sub.add_parser("deploys", help="deploy history with release notes and migrations").set_defaults(fn=cmd_deploys)
+s = sub.add_parser("deploy", help="deploy a version")
+s.add_argument("version")
+s.set_defaults(fn=cmd_deploy)
+sub.add_parser("rollback", help="return to the previous version").set_defaults(fn=cmd_rollback)
+sub.add_parser("rotate-payment-key", help="switch the shop to the secondary payment key").set_defaults(fn=cmd_rotate)
+args = p.parse_args()
+args.fn(args)

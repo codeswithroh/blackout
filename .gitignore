@@ -1,0 +1,6 @@
+infra/.env
+infra/.agents.json
+spike/
+.gstack/
+.venv
+__pycache__/

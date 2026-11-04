@@ -1,0 +1,3 @@
+#!/bin/sh
+# Runs a Blackout script with its two dependencies.
+exec uv run --quiet --with httpx --with websockets --no-project python "$@"
