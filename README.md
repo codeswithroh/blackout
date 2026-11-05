@@ -2,6 +2,8 @@
 
 Fire drills for teams of people and agents.
 
+[Watch the 2-minute demo](https://youtu.be/Q-SrSZ0w-4o)
+
 Everyone else is building an agent to handle your incident. Blackout's agents cause one.
 
 Say `@blackout start` in Mattermost and a real web shop breaks. Traffic starts failing, an alert lands in the on-call room, and your team has to fix it with their own agent while a customer and a CEO demand answers in separate rooms. One bot gives confident, wrong advice. If someone approves it, the outage gets worse, for real. When the shop recovers, Blackout scores the team on what they did and proposes a runbook fix for a person to review.
