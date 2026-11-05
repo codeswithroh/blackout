@@ -50,16 +50,32 @@ class Conn:
 
     def __init__(self, agent, on_message):
         self.agent, self.on_message, self.id = agent, on_message, str(uuid.uuid4())
-        self.cursor, self.gen, self.ws, self.task = 0, None, None, None
+        self.cursor, self.gen, self.ws, self.task, self.closing = 0, None, None, None, False
 
-    async def open(self):
+    async def connect(self):
         url = f"ws://localhost:8000/agents/{self.agent.id}/connection/ws?connection_id={self.id}&scope=all&filter=all&start_from={self.cursor or 'head'}"
         if self.gen is not None:
             url += f"&expected_generation={self.gen}"
         self.ws = await websockets.connect(url, additional_headers=self.agent.h)
+
+    async def open(self):
+        await self.connect()
         self.task = asyncio.create_task(self.loop())
 
     async def loop(self):
+        """Switch can drop a stream that goes quiet, so resume from the cursor until we're told to stop."""
+        while True:
+            await self.read()
+            while not self.closing:
+                try:
+                    await self.connect()
+                    break
+                except (OSError, websockets.WebSocketException):
+                    await asyncio.sleep(1)
+            if self.closing:
+                return
+
+    async def read(self):
         try:
             async for raw in self.ws:
                 f = json.loads(raw)
@@ -79,8 +95,10 @@ class Conn:
             pass
 
     async def close(self):
+        self.closing = True
         await self.ws.close()
         await self.task
+        self.closing = False
 
     async def reconnect(self):
         await self.close()
